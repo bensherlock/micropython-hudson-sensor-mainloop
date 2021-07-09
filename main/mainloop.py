@@ -1,9 +1,9 @@
 #! /usr/bin/env python
 #
-# MicroPython MainLoop for USMART Sensor Application.
+# MicroPython MainLoop for HUDSON Sensor Application.
 #
-# This file is part of micropython-usmart-sensor-mainloop
-# https://github.com/bensherlock/micropython-usmart-sensor-mainloop
+# This file is part of micropython-hudson-sensor-mainloop
+# https://github.com/bensherlock/micropython-hudson-sensor-mainloop
 #
 # Standard Interface for MainLoop
 # - def run_mainloop() : never returns
@@ -38,12 +38,11 @@ import utime
 
 from pybd_expansion.main.max3221e import MAX3221E
 from pybd_expansion.main.powermodule import PowerModule
-import sensor_payload.main.sensor_payload as sensor_payload
+
 
 from uac_modem.main.unm3driver import MessagePacket, Nm3
-from uac_modem.main.unm3networksimple import Nm3NetworkSimple
 
-from uac_network.main.sensor_node import NetProtocol
+from uac_network.main.hudson_sensor_node_network import HudsonSensorNodeNetwork
 
 import jotter
 
@@ -53,48 +52,6 @@ micropython.alloc_emergency_exception_buf(100)
 
 
 _env_variables = None
-_rtc_callback_flag = False
-_rtc_alarm_period_s = 10
-_rtc_next_alarm_time_s = 0
-
-
-def rtc_set_next_alarm_time_s(alarm_time_s_from_now):
-    global _rtc_next_alarm_time_s
-
-    if 0 < alarm_time_s_from_now <= 7200:  # above zero and up to two hours
-        _rtc_next_alarm_time_s = utime.time() + alarm_time_s_from_now
-        print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
-
-
-def rtc_set_alarm_period_s(alarm_period_s):
-    """Set the alarm period in seconds. Updates the next alarm time from now. If 0 then cancels the alarm."""
-    global _rtc_alarm_period_s
-    global _rtc_next_alarm_time_s
-    _rtc_alarm_period_s = alarm_period_s
-    if _rtc_alarm_period_s > 0:
-        _rtc_next_alarm_time_s = utime.time() + _rtc_alarm_period_s
-    else:
-        _rtc_next_alarm_time_s = 0  # cancel the alarm
-
-    print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
-
-_rtc_callback_seconds = 0  # can be used to stay awake for X seconds after the last RTC wakeup
-
-
-def rtc_callback(unknown):
-    # NB: You cannot do anything that allocates memory in this interrupt handler.
-    global _rtc_callback_flag
-    global _rtc_callback_seconds
-    global _rtc_alarm_period_s
-    global _rtc_next_alarm_time_s
-    # RTC Callback function -
-    # pyb.LED(2).toggle()
-    # Only set flag if it is alarm time
-    if 0 < _rtc_next_alarm_time_s <= utime.time():
-        _rtc_callback_flag = True
-        _rtc_callback_seconds = utime.time()
-        _rtc_next_alarm_time_s = _rtc_next_alarm_time_s + _rtc_alarm_period_s  # keep the period consistent
-
 
 _nm3_callback_flag = False
 _nm3_callback_seconds = 0  # used with utime.localtime(_nm3_callback_seconds) to make a timestamp
@@ -128,7 +85,7 @@ def send_usmart_alive_message(modem):
         #                        source_file=__name__)
         # So here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
         # Plus a version/date so we can determine if an OTA update has worked
-        alive_string = "UA" + "{:03d}".format(nm3_address) + "B{:0.2f}V".format(nm3_voltage) + "REV:2021-04-08T13:27:00"
+        alive_string = "UA" + "{:03d}".format(nm3_address) + "B{:0.2f}V".format(nm3_voltage) + "REV:2021-07-09T17:38:00"
         modem.send_broadcast_message(alive_string.encode('utf-8'))
 
 
@@ -145,8 +102,6 @@ def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
 
     global _env_variables
-    global _rtc_callback_flag
-    global _rtc_callback_seconds
     global _nm3_callback_flag
     global _nm3_callback_seconds
     global _nm3_callback_millis
@@ -179,16 +134,6 @@ def run_mainloop():
 
     # Feed the watchdog
     wdt.feed()
-
-
-    # Set RTC to wakeup at a set interval
-    rtc = pyb.RTC()
-    rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
-    # A default wakeup to start with. To be overridden by network manager/sleep manager
-    rtc.wakeup(10 * 1000, rtc_callback)  # milliseconds - # Every 10 seconds
-
-    rtc_set_alarm_period_s(60 * 60)  # Every 60 minutes to do the sensors by default
-    _rtc_callback_flag = True  # Set the flag so we do a status message on startup.
 
     pyb.LED(2).on()  # Green LED On
 
@@ -230,10 +175,6 @@ def run_mainloop():
     jotter.get_jotter().jot("NM3 running", source_file=__name__)
 
 
-
-    # nm3_network = Nm3NetworkSimple(nm3_modem)
-    # gateway_address = 7
-
     # Grab address and voltage from the modem
     nm3_address = nm3_modem.get_address()
     utime.sleep_ms(20)
@@ -243,9 +184,8 @@ def run_mainloop():
     jotter.get_jotter().jot("NM3 Address {:03d} Voltage {:0.2f}V.".format(nm3_address, nm3_voltage),
                             source_file=__name__)
 
-    # Sometimes (maybe from brownout) restarting the modem leaves it in a state where you can talk to it on the
-    # UART fine, but there's no ability to receive incoming acoustic comms until the modem has been fired.
-    # So here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
+
+    # Here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
     send_usmart_alive_message(nm3_modem)
 
 
@@ -256,19 +196,10 @@ def run_mainloop():
     # Delay for transmission of broadcast packet
     utime.sleep_ms(500)
 
-    # sensor payload
-    sensor = sensor_payload.get_sensor_payload_instance()
-    # sensor.start_acquisition()
-    # sensor_acquisition_start = utime.time()
-    # while (not sensor.is_completed()) and (utime.time() < sensor_acquisition_start + 5):
-    #    sensor.process_acquisition()
 
-    # Feed the watchdog
-    wdt.feed()
-
-    nm3_network = NetProtocol()
-    nm3_network.init_interfaces(nm3_modem, sensor, wdt)  # This function talks to the modem to get address and voltage
-    network_can_go_to_sleep = False
+    # Mauro's HUDSON Network Protocol to be created here
+    nm3_network = HudsonSensorNodeNetwork()
+    nm3_network.init_interfaces(nm3_modem, wdt)  # Provides the modem and watchdog timer to be held by the network module
 
     utime.sleep_ms(100)
 
@@ -279,86 +210,21 @@ def run_mainloop():
     uptime_start = utime.time()
 
 
-
-    # Turn off the USB
-    # pyb.usb_mode(None)  # Except when in development
-
     # Operating Mode
     #
-    # Note: Sensor data is only sent in response to a command from the gateway or relay.
-    #
-    # Sensor data is acquired when the RTC wakes us up. Default set RTC alarm to hourly.
-    # In the absence of a packet with TTNF information we will at least continue to grab sensor values ready for when
-    # we do next get a network packet.
-    #
-    # From Power up:
-    #   WDT enabled at 30 seconds.
-    #   NM3 powered. Sleep with wake on HW. Accepting unsolicited messages.
-    #   Parse and feed to Localisation/Network submodules.
-    #   RTC set to hourly to grab sensor data.
-    #
-    #   network.handle_packet() returns a stay awake flag and a time to next frame.
-    #   If network says go to sleep with a time-to-next-frame
-    #     Take off time for NM3 startup (7 seconds), set next RTC alarm for wakeup, power off NM3 and go to sleep.
-    #     (Check TTNF > 30 seconds) - otherwise leave the NM3 powered.
-    #
-    #   If RTC alarm says wakeup
-    #     power up NM3
-    #     power up sensors and take a reading whilst NM3 is waking up.
-    #
-    #   General run state
-    #     Go to sleep with NM3 powered. Await incoming commands and HW wakeup.
-    #
+    # Note: This application only acts in response to incoming acoustic messages.
+    # The remainder of the time it will be in lightsleep mode. The modem will remain powered up.
+    # The NM3 Flagline on the HW interrupt will wake us up.
+
 
     while True:
         try:
-
-            # First entry in the while loop and also after a caught exception
-            # pyb.LED(2).on()  # Awake
-
             # Feed the watchdog
             wdt.feed()
-
-            # The order and flow below will change.
-            # However sending packets onwards to the submodules will occur on receipt of incoming messages.
-            # At the moment the RTC is timed to wakeup, take a sensor reading, and send it to the gateway
-            # via Nm3 as simple unicast before returning to sleep. This will be expanded to accommodate the network
-            # protocol with wakeup, resynchronise on beacon, time offset for transmission etc.
-
-            # Start of the wake loop
-            # 1. Incoming NM3 MessagePackets (HW Wakeup)
-            # 2. Periodic Sensor Readings (RTC)
 
             # Enable power supply to 232 driver
             pyb.Pin.board.EN_3V3.on()
 
-            if _rtc_callback_flag:
-                _rtc_callback_flag = False  # Clear the flag
-                print("RTC Flag. Powering up NM3 and getting sensor data." + " time now=" + str(utime.time()))
-                jotter.get_jotter().jot("RTC Flag. Powering up NM3 and getting sensor data.", source_file=__name__)
-
-                # Enable power supply to 232 driver and sensors and sdcard
-                pyb.Pin.board.EN_3V3.on()
-                max3221e.tx_force_on()  # Enable Tx Driver
-
-                # Start Power up NM3
-                utime.sleep_ms(100)
-                network_can_go_to_sleep = False  # Make sure we keep NM3 powered until Network says otherwise
-                powermodule.enable_nm3()
-                nm3_startup_time = utime.time()
-
-                # sensor payload - BME280 and LSM303AGR and VBatt
-                utime.sleep_ms(500)  # Allow sensors to startup before starting acquisition.
-                sensor.start_acquisition()
-                sensor_acquisition_start = utime.time()
-                while (not sensor.is_completed()) and (utime.time() < sensor_acquisition_start + 6):
-                    sensor.process_acquisition()
-                    utime.sleep_ms(100)  # yield
-
-                # Wait for completion of NM3 bootup (if it wasn't already powered)
-                while utime.time() < nm3_startup_time + 7:
-                    utime.sleep_ms(100)  # yield
-                    pass
 
             # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
             if _nm3_callback_flag or (utime.time() < _nm3_callback_seconds + 30):
@@ -435,85 +301,32 @@ def run_mainloop():
                                     # Feed the watchdog
                                     wdt.feed()
 
-                    if message_packet.packet_payload and bytes(message_packet.packet_payload) == b'USCALDO':
-                        # print("CAL message received.")
-                        jotter.get_jotter().jot("CAL message received.", source_file=__name__)
-
-                        nm3_address = nm3_modem.get_address()
-
-                        # Reply with an acknowledgement then start the calibration
-                        msg_string = "USCALMSG" + "{:03d}".format(nm3_address) + ":Starting Calibration"
-                        nm3_modem.send_broadcast_message(msg_string.encode('utf-8'))
-                        # delay whilst sending
-                        utime.sleep_ms(1000)
-                        # Feed the watchdog
-                        wdt.feed()
-                        # start calibration
-                        (x_min, x_max, y_min, y_max, z_min, z_max) = sensor.do_calibration(duration=20)
-                        # Feed the watchdog
-                        wdt.feed()
-                        # magneto values are int16
-                        caldata_string = "USCALDATA" + "{:03d}".format(nm3_address) + ":" \
-                                         + "{:06d},{:06d},{:06d},{:06d},{:06d},{:06d}".format(x_min, x_max,
-                                                                                              y_min, y_max,
-                                                                                              z_min, z_max)
-                        nm3_modem.send_broadcast_message(caldata_string.encode('utf-8'))
-                        # delay whilst sending
-                        utime.sleep_ms(1000)
+                    # How are HUDSON network messages prefixed to filter from other messages? Is this the '#'?
 
                     # Send on to submodules: Network/Localisation UN/UL
                     if message_packet.packet_payload and len(message_packet.packet_payload) > 2 and \
-                            bytes(message_packet.packet_payload[:2]) == b'UN':
+                            bytes(message_packet.packet_payload[:1]) == b'#':
                         # Network Packet
 
                         # Wrap with garbage collection to tidy up memory usage.
                         import gc
                         gc.collect()
-                        (sleepflag, ttnf, network_packet_ignored) = nm3_network.handle_packet(message_packet)
+                        # Call Mauro's Network Module here and provide the packet
+                        nm3_network.handle_packet(message_packet)
                         gc.collect()
-
-                        if not network_packet_ignored:
-                            network_can_go_to_sleep = sleepflag
-                            time_till_next_req_ms = ttnf
-
-                            print("network_can_go_to_sleep=" + str(network_can_go_to_sleep) + " time_till_next_req_ms=" + str(time_till_next_req_ms))
-                            # Update the RTC alarm such that we power up the NM3 and take a sensor reading
-                            # ahead of the next network frame.
-                            if 60000 < time_till_next_req_ms:  # more than 60 seconds
-                                # Next RTC wakeup = time_till_next_req_ms/1000 - 60
-                                # to take into account the 10second resolution and NM3 powerup time
-                                rtc_seconds_from_now = int((time_till_next_req_ms - 60000) / 1000)
-                                rtc_set_next_alarm_time_s(rtc_seconds_from_now)
-                                print("Set RTC alarm with rtc_seconds_from_now=" + str(rtc_seconds_from_now))
-                                pass
-                            else:
-                                # RTC should default to hourly so leave alone.
-                                print("Leaving RTC alarm as default (hourly).")
-                                pass
-
-                            # Check there's enough time to make it worth powering down the NM3
-                            if network_can_go_to_sleep and time_till_next_req_ms < 30000:
-                                # if not at least 30 seconds til next frame then we will not power off the modem
-                                network_can_go_to_sleep = False
 
                         pass  # End of Network Packets
 
-                    if message_packet.packet_payload and len(message_packet.packet_payload) > 2 and \
-                            bytes(message_packet.packet_payload[:2]) == b'UL':
-                        # Localisation Packet
-                        pass  # End of Localisation Packets
 
-            # If too long since last synch and not rtc callback and too long since
-            if not _rtc_callback_flag and (not _nm3_callback_flag) and (utime.time() > _nm3_callback_seconds + 30):
+
+            # If too long since last synch
+            if (not _nm3_callback_flag) and (utime.time() > _nm3_callback_seconds + 30):
 
                 # Double check the flags before powering things off
-                if (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                if (not _nm3_callback_flag):
                     print("Going to sleep.")
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
-                    if network_can_go_to_sleep:
-                        print("NM3 powering down.")
-                        powermodule.disable_nm3()  # power down the NM3
-                        pass
+
 
                     # Disable the I2C pullups
                     pyb.Pin('PULL_SCL', pyb.Pin.IN)  # disable 5.6kOhm X9/SCL pull-up
@@ -524,7 +337,7 @@ def run_mainloop():
                     pyb.LED(2).off()  # Asleep
                     utime.sleep_ms(10)
 
-                while (not _rtc_callback_flag) and (not _nm3_callback_flag):
+                while (not _nm3_callback_flag):
                     # Feed the watchdog
                     wdt.feed()
                     # Now wait
