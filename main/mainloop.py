@@ -52,6 +52,49 @@ micropython.alloc_emergency_exception_buf(100)
 
 
 _env_variables = None
+_rtc_callback_flag = False
+_rtc_alarm_period_s = 10
+_rtc_next_alarm_time_s = 0
+
+
+def rtc_set_next_alarm_time_s(alarm_time_s_from_now):
+    global _rtc_next_alarm_time_s
+
+    if 0 < alarm_time_s_from_now <= 7200:  # above zero and up to two hours
+        _rtc_next_alarm_time_s = utime.time() + alarm_time_s_from_now
+        print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
+
+
+def rtc_set_alarm_period_s(alarm_period_s):
+    """Set the alarm period in seconds. Updates the next alarm time from now. If 0 then cancels the alarm."""
+    global _rtc_alarm_period_s
+    global _rtc_next_alarm_time_s
+    _rtc_alarm_period_s = alarm_period_s
+    if _rtc_alarm_period_s > 0:
+        _rtc_next_alarm_time_s = utime.time() + _rtc_alarm_period_s
+    else:
+        _rtc_next_alarm_time_s = 0  # cancel the alarm
+
+    print("_rtc_next_alarm_time_s=" + str(_rtc_next_alarm_time_s) + " time now=" + str(utime.time()))
+
+
+_rtc_callback_seconds = 0  # can be used to stay awake for X seconds after the last RTC wakeup
+
+
+def rtc_callback(unknown):
+    # NB: You cannot do anything that allocates memory in this interrupt handler.
+    global _rtc_callback_flag
+    global _rtc_callback_seconds
+    global _rtc_alarm_period_s
+    global _rtc_next_alarm_time_s
+    # RTC Callback function -
+    # pyb.LED(2).toggle()
+    # Only set flag if it is alarm time
+    if 0 < _rtc_next_alarm_time_s <= utime.time():
+        _rtc_callback_flag = True
+        _rtc_callback_seconds = utime.time()
+        _rtc_next_alarm_time_s = _rtc_next_alarm_time_s + _rtc_alarm_period_s  # keep the period consistent
+
 
 _nm3_callback_flag = False
 _nm3_callback_seconds = 0  # used with utime.localtime(_nm3_callback_seconds) to make a timestamp
@@ -102,6 +145,8 @@ def run_mainloop():
     """Standard Interface for MainLoop. Never returns."""
 
     global _env_variables
+    global _rtc_callback_flag
+    global _rtc_callback_seconds
     global _nm3_callback_flag
     global _nm3_callback_seconds
     global _nm3_callback_millis
@@ -134,6 +179,16 @@ def run_mainloop():
 
     # Feed the watchdog
     wdt.feed()
+
+    # Set RTC to wakeup at a set interval
+    rtc = pyb.RTC()
+    rtc.init()  # reinitialise - there were bugs in firmware. This wipes the datetime.
+    # A default wakeup to start with. To be overridden by network manager/sleep manager
+    rtc.wakeup(10 * 1000, rtc_callback)  # milliseconds - # Every 10 seconds - needed to feed the watchdog
+
+    rtc_set_alarm_period_s(60 * 60)  # Every 60 minutes to do the sensors by default
+    _rtc_callback_flag = True  # Set the flag so we do a status message on startup.
+
 
     pyb.LED(2).on()  # Green LED On
 
@@ -184,18 +239,15 @@ def run_mainloop():
     jotter.get_jotter().jot("NM3 Address {:03d} Voltage {:0.2f}V.".format(nm3_address, nm3_voltage),
                             source_file=__name__)
 
-
     # Here we will broadcast an I'm Alive message. Payload: U (for USMART), A (for Alive), Address, B, Battery
-    send_usmart_alive_message(nm3_modem)
-
-
+    # send_usmart_alive_message(nm3_modem)
+    # Disabled for HUDSON. The USPNG message can still be used to get this data.
 
     # Feed the watchdog
     wdt.feed()
 
     # Delay for transmission of broadcast packet
     utime.sleep_ms(500)
-
 
     # Mauro's HUDSON Network Protocol to be created here
     nm3_network = HudsonSensorNodeNetwork()
@@ -215,7 +267,8 @@ def run_mainloop():
     # Note: This application only acts in response to incoming acoustic messages.
     # The remainder of the time it will be in lightsleep mode. The modem will remain powered up.
     # The NM3 Flagline on the HW interrupt will wake us up.
-
+    # The RTC callback is used to wake the PYBD every 10 seconds to feed the watchdog.
+    # The default hourly alarm is not currently used by this application.
 
     while True:
         try:
@@ -225,6 +278,13 @@ def run_mainloop():
             # Enable power supply to 232 driver
             pyb.Pin.board.EN_3V3.on()
 
+            # Check for the RTC alarm flag
+            if _rtc_callback_flag:
+                _rtc_callback_flag = False  # Clear the flag
+                print("RTC Flag. Nothing to do." + " time now=" + str(utime.time()))
+                jotter.get_jotter().jot("RTC Flag. Nothing to do.", source_file=__name__)
+                # We're not using the RTC in this application. But it is needed to ensure the WDT is fed.
+                pass
 
             # If we're within 30 seconds of the last timestamped NM3 synch arrival then poll for messages.
             if _nm3_callback_flag or (utime.time() < _nm3_callback_seconds + 30):
@@ -317,16 +377,13 @@ def run_mainloop():
 
                         pass  # End of Network Packets
 
-
-
-            # If too long since last synch
-            if (not _nm3_callback_flag) and (utime.time() > _nm3_callback_seconds + 30):
+            # If too long since last synch and no RTC flag
+            if not _rtc_callback_flag and (not _nm3_callback_flag) and (utime.time() > _nm3_callback_seconds + 30):
 
                 # Double check the flags before powering things off
-                if (not _nm3_callback_flag):
+                if (not _rtc_callback_flag) and (not _nm3_callback_flag):
                     print("Going to sleep.")
                     jotter.get_jotter().jot("Going to sleep.", source_file=__name__)
-
 
                     # Disable the I2C pullups
                     pyb.Pin('PULL_SCL', pyb.Pin.IN)  # disable 5.6kOhm X9/SCL pull-up
@@ -337,7 +394,7 @@ def run_mainloop():
                     pyb.LED(2).off()  # Asleep
                     utime.sleep_ms(10)
 
-                while (not _nm3_callback_flag):
+                while (not _rtc_callback_flag) and (not _nm3_callback_flag):
                     # Feed the watchdog
                     wdt.feed()
                     # Now wait
